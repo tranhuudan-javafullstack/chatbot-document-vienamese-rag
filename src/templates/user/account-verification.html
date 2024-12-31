@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Account Verification</title>
+    <style>
+        .email-container {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+            max-width: 600px;
+            margin: auto;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            background-color: #f9f9f9;
+        }
+
+        .button {
+            display: inline-block;
+            padding: 10px 20px;
+            font-size: 16px;
+            color: #fff;
+            background-color: #007BFF;
+            text-decoration: none;
+            border-radius: 5px;
+            text-align: center;
+        }
+
+        .button:hover {
+            background-color: #0056b3;
+        }
+    </style>
+</head>
+<body>
+<div class="email-container">
+    <h1>Welcome to {{ app_name }}!</h1>
+    <p>Dear {{ name }},</p>
+    <p>Thank you for signing up. Please activate your account by clicking the link below:</p>
+    <p>
+        <a href="{{ activate_url }}" class="button">Activate Account</a>
+    </p>
+    <p>If the button above doesn't work, please copy and paste the following URL into your browser:</p>
+    <p><a href="{{ activate_url }}">{{ activate_url }}</a></p>
+    <div class="footer">
+        <p>Thank you for choosing us!</p>
+        <p>Best Regards,<br>{{ app_name }}</p>
+    </div>
+</div>
+</body>
+</html>

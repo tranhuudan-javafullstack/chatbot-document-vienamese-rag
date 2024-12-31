@@ -1,0 +1,275 @@
+﻿version: '3.8'
+
+services:
+  frontend:
+    container_name: frontend
+    build:
+      context: .
+      dockerfile: Dockerfile2
+    image: kltn-frontend
+    volumes:
+      - './chat_text_web_demo:/app'
+      - '/app/node_modules'
+    ports:
+      - 3001:3001
+    networks:
+      - huudan
+  fastapi-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: kltn
+    container_name: fastapi
+    restart: unless-stopped
+    depends_on:
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      weaviate:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8068/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    ports:
+      - "8068:8068"
+    env_file:
+      - .env
+    networks:
+      - huudan
+    volumes:
+      - ".:/usr/srv"
+    
+  minio:
+    container_name: minio
+    restart: unless-stopped
+    image: minio/minio
+    volumes:
+      - minio-data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      - huudan
+    env_file:
+      - .env
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_ACCESS_KEY}
+      MINIO_CACHE_QUOTA: 80 # 80% of the drive will be used for caching
+      MINIO_CACHE_AFTER: 1 # Object will be cached after the first request to it
+      MINIO_CACHE_WATERMARK_LOW: 70 # Least accessed objects will be erased after the cache disk reaches the 70% watermark
+      MINIO_CACHE_WATERMARK_HIGH: 90
+      MINIO_PROMETHEUS_AUTH_TYPE: public
+      MINIO_CACHE=: "on"
+      MINIO_CACHE_DRIVES: /mnt/drive1,/mnt/drive2
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:9000/minio/health/live" ]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  minio-bucket:
+    image: minio/mc
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - huudan
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc config host add kltn2024 http://minio:9000 huudantran123@ huudantran123@;
+      /usr/bin/mc mb kltn2024/file-storage;
+      /usr/bin/mc policy download kltn2024/file-storage;
+      exit 0;
+      "
+  redis-exporter:
+    image: oliver006/redis_exporter
+    ports:
+      - 9121:9121
+    environment:
+      REDIS_ADDR: "redis:6379"
+      REDIS_USER: null
+      REDIS_PASSWORD: $REDIS_PASSWORD
+    networks:
+      - huudan
+    depends_on:
+      - redis
+  redis:
+    image: redis:latest
+    container_name: redis
+    restart: unless-stopped
+    depends_on:
+      - redis-insight
+    ports:
+      - "6379:6379"
+    env_file:
+      - .env
+    command: /bin/sh -c "redis-server --requirepass $$REDIS_PASSWORD"
+    networks:
+      - huudan
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+  
+  redis-insight:
+    image: redis/redisinsight:latest
+    restart: unless-stopped
+    ports:
+      - "5540:5540"
+    volumes:
+      - redis-insight:/data
+  
+  reranker-transformers:
+    image: cr.weaviate.io/semitechnologies/reranker-transformers:cross-encoder-ms-marco-MiniLM-L-6-v2
+    environment:
+      ENABLE_CUDA: '0'
+    networks:
+      - huudan
+  weaviate:
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - '8080'
+      - --scheme
+      - http
+    image: semitechnologies/weaviate:1.25.6
+    ports:
+      - "8080:8080"
+      - "50051:50051"
+    restart: unless-stopped
+    environment:
+      LOG_LEVEL: debug
+      LIMIT_RESOURCES: 'true'
+      PROMETHEUS_MONITORING_PORT: 2112
+      PROMETHEUS_MONITORING_ENABLED: 'true'
+      QUERY_DEFAULTS_LIMIT: 25
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: 'true'
+      PERSISTENCE_DATA_PATH: '/var/lib/weaviate'
+      CLUSTER_HOSTNAME: 'node1'
+      ASYNC_INDEXING: 'true'
+      AUTOSCHEMA_ENABLED: 'true'
+      REINDEX_SET_TO_ROARINGSET_AT_STARTUP: 'true'
+      USE_SENTENCE_TRANSFORMERS_VECTORIZER: 'true'
+      HNSW_STARTUP_WAIT_FOR_VECTOR_CACHE: 'true'
+      ENABLE_MODULES: 'text2vec-huggingface, generative-ollama,reranker-cohere,reranker-transformers,generative-openai,qna-openai,'
+      DEFAULT_VECTORIZER_MODULE: 'none'
+      RERANKER_INFERENCE_API: 'http://reranker-transformers:8080'
+    volumes:
+      - weaviate-data:/var/lib/weaviate
+    networks:
+      - huudan
+    healthcheck:
+      test: [ "CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/v1/.well-known/ready" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  prometheus:
+    image: prom/prometheus:v2.46.0
+    volumes:
+      - ./prometheus:/etc/prometheus/
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    ports:
+      - "9090:9090"
+    depends_on:
+      weaviate:
+        condition: service_healthy
+      redis-exporter:
+        condition: service_started
+      fastapi-service:
+        condition: service_started
+      mongodb_exporter:
+        condition: service_started
+    networks:
+      - huudan
+  grafana:
+    image: grafana/grafana-oss
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_USER=admin
+    volumes:
+      - ./grafana/grafana.ini:/etc/grafana/grafana.ini
+      - ./grafana/datasource.yml:/etc/grafana/provisioning/datasources/prometheus.yml
+      - ./grafana/dashboard_provider.yml:/etc/grafana/provisioning/dashboards/dashboards.yml
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      weaviate:
+        condition: service_healthy
+    networks:
+      - huudan
+  mongodb_exporter:
+    image: percona/mongodb_exporter:0.40
+    container_name: mongodb_exporter
+    restart: unless-stopped
+    ports:
+      - "9216:9216"
+    command: >
+      --mongodb.global-conn-pool 
+      --collector.diagnosticdata 
+      --discovering-mode 
+      --compatible-mode 
+      --mongodb.collstats-colls=admin.companies,admin.restaurants
+    networks:
+      - huudan
+    env_file:
+      - .env
+    environment:
+      WAIT_HOSTS: mongodb:27017
+      MONGODB_URI: $MONGO_CONNECTION_STRING
+    depends_on:
+      mongodb:
+        condition: service_healthy
+  mongodb:
+    container_name: mongodb
+    image: mongo:latest
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb-data:/data/db
+      - ./mongodb/mongod.conf:/etc/mongod.conf
+    env_file:
+      - .env
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+    command: >
+      --auth
+      --profile 2 
+      --slowms 15 
+      --slowOpSampleRate 0.5
+    networks:
+      - huudan
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  huudan:
+    driver: bridge
+
+volumes:
+  minio-data:
+  redis-insight:
+  mongodb-data:
+  prometheus-data:
+  weaviate-data:
+  grafana-data:
